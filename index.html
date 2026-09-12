@@ -124,7 +124,9 @@
             });
             const [tempSyncCode, setTempSyncCode] = useState(syncCode);
             const [showSyncModal, setShowSyncModal] = useState(false);
+            const [copied, setCopied] = useState(false);
 
+            const [projectName, setProjectName] = useState(() => load('projectName', 'Neues Projekt'));
             const [db, setDb] = useState(() => load('materialDB', { filament: [], resin: [], uv: [], other: [] }));
             const [fdmSlots, setFdmSlots] = useState(() => {
                 const saved = load('fdmSlots', null);
@@ -148,6 +150,7 @@
             const [washCure, setWashCure] = useState(() => load('washCure', { purchasePrice: 0, lifespan: 2000, watts: 40, minutes: 0, active: false }));
             const [globalSettings, setGlobalSettings] = useState(() => load('globalSettings', { electricityPriceKWh: 0.35 }));
             const [job, setJob] = useState(() => load('job', { laborRate: 0, laborMinutes: 0 }));
+            const [calculationAddons, setCalculationAddons] = useState(() => load('calculationAddons', { failRatePercent: 0, marginPercent: 0 }));
             
             const [syncStatus, setSyncStatus] = useState('offline');
             const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -179,6 +182,7 @@
                 const unsubscribe = docRef.onSnapshot((doc) => {
                     if (doc.exists) {
                         const d = doc.data();
+                        if (d.projectName !== undefined) setProjectName(d.projectName);
                         if (d.db) setDb(d.db);
                         if (d.fdmSlots) setFdmSlots(d.fdmSlots);
                         if (d.resinMaterial) setResinMaterial(d.resinMaterial);
@@ -189,9 +193,10 @@
                         if (d.washCure) setWashCure(d.washCure);
                         if (d.globalSettings) setGlobalSettings(d.globalSettings);
                         if (d.job) setJob(d.job);
+                        if (d.calculationAddons) setCalculationAddons(d.calculationAddons);
                         setSyncStatus('synced');
                     } else {
-                        const initialPayload = { db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job };
+                        const initialPayload = { projectName, db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, calculationAddons };
                         docRef.set(initialPayload).then(() => setSyncStatus('synced'));
                     }
                     isInitialLoad.current = false;
@@ -205,7 +210,7 @@
 
             // Auto-Save in LocalStorage und Firestore (mit Debounce)
             useEffect(() => {
-                const data = { db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job };
+                const data = { projectName, db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, calculationAddons };
                 Object.keys(data).forEach(key => localStorage.setItem(key, JSON.stringify(data[key])));
 
                 if (isInitialLoad.current || !isAuthenticated || !syncCode || syncCode.length !== 6) return;
@@ -221,7 +226,7 @@
                 }, 800);
 
                 return () => clearTimeout(timer);
-            }, [db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, isAuthenticated, syncCode]);
+            }, [projectName, db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, calculationAddons, isAuthenticated, syncCode]);
 
             const saveSyncCode = () => {
                 const cleaned = tempSyncCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6);
@@ -288,16 +293,83 @@
                 };
                 const fdmOp = calcDev(printerFdm); const resinOp = calcDev(printerResin); const washOp = calcWash(washCure);
                 const laborCost = (n(job.laborRate) / 60) * n(job.laborMinutes);
-                const total = matFdm + matResin + matUv + matOther + fdmOp.elec + fdmOp.depr + resinOp.elec + resinOp.depr + washOp.elec + washOp.depr + laborCost;
-                return { total, parts: { filament: matFdm, resin: matResin, uvHarz: matUv, other: matOther, op: fdmOp.elec + fdmOp.depr + resinOp.elec + resinOp.depr + washOp.elec + washOp.depr, labor: laborCost } };
-            }, [fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job]);
+                
+                const baseTotal = matFdm + matResin + matUv + matOther + fdmOp.elec + fdmOp.depr + resinOp.elec + resinOp.depr + washOp.elec + washOp.depr + laborCost;
+                
+                const failRate = n(calculationAddons.failRatePercent);
+                const failAmount = baseTotal * (failRate / 100);
+                const totalCostWithFail = baseTotal + failAmount;
+
+                const marginRate = n(calculationAddons.marginPercent);
+                const marginAmount = totalCostWithFail * (marginRate / 100);
+                const finalTotal = totalCostWithFail + marginAmount;
+
+                return { 
+                    baseTotal,
+                    failAmount,
+                    totalCostWithFail,
+                    marginAmount,
+                    finalTotal,
+                    parts: { 
+                        filament: matFdm, 
+                        resin: matResin, 
+                        uvHarz: matUv, 
+                        other: matOther, 
+                        op: fdmOp.elec + fdmOp.depr + resinOp.elec + resinOp.depr + washOp.elec + washOp.depr, 
+                        labor: laborCost 
+                    } 
+                };
+            }, [fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, calculationAddons]);
+
+            const copySummaryToClipboard = () => {
+                const lines = [];
+                lines.push(`📋 3D-Druck Kalkulation: ${projectName}`);
+                lines.push(`──────────────────────────────`);
+                
+                // Aktive Filamente
+                fdmSlots.forEach((slot, idx) => {
+                    if (slot.active && slot.used > 0) {
+                        lines.push(`• Filament: ${slot.name || `Slot ${idx+1}`} (${slot.used}g)`);
+                    }
+                });
+                if (resinMaterial.active && resinMaterial.used > 0) {
+                    lines.push(`• Resin: ${resinMaterial.name || 'Resin'} (${resinMaterial.used}g)`);
+                }
+                if (uvResin.active && uvResin.used > 0) {
+                    lines.push(`• UV-Harz: ${uvResin.name || 'UV'} (${uvResin.used}g)`);
+                }
+                otherMaterials.forEach((m) => {
+                    if (m.active && m.price > 0) {
+                        lines.push(`• Verbrauch: ${m.name || 'Material'} (${m.price.toFixed(2)} €)`);
+                    }
+                });
+                
+                if (printerFdm.active && printerFdm.hours > 0) lines.push(`• FDM Druckzeit: ${printerFdm.hours} Std.`);
+                if (printerResin.active && printerResin.hours > 0) lines.push(`• Resin Druckzeit: ${printerResin.hours} Std.`);
+                if (washCure.active && washCure.minutes > 0) lines.push(`• Wash/Cure Zeit: ${washCure.minutes} Min.`);
+                if (job.laborMinutes > 0) lines.push(`• Arbeitszeit: ${job.laborMinutes} Min.`);
+                
+                lines.push(`──────────────────────────────`);
+                lines.push(`Selbstkosten (Basis): ${results.baseTotal.toFixed(2)} €`);
+                if (calculationAddons.failRatePercent > 0) {
+                    lines.push(`Fehldruck (+${calculationAddons.failRatePercent}%): +${results.failAmount.toFixed(2)} €`);
+                }
+                if (calculationAddons.marginPercent > 0) {
+                    lines.push(`Marge/Gewinn (+${calculationAddons.marginPercent}%): +${results.marginAmount.toFixed(2)} €`);
+                }
+                lines.push(`GESAMTPREIS: ${results.finalTotal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}`);
+                
+                navigator.clipboard.writeText(lines.join('\n'));
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            };
 
             return (
                 <div className="min-h-screen flex flex-col animate-fade-in text-slate-800 pb-10">
                     <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-50 px-3 h-14 flex items-center justify-between shadow-md text-white">
                         <div className="flex items-center gap-2">
                             <img src="logo.png" className="w-8 h-8 rounded-lg shadow-sm" onError={(e) => e.target.style.display='none'} />
-                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V0.0.6</span></h1>
+                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V0.0.7</span></h1>
                             <div className="flex items-center ml-2 cursor-pointer" onClick={() => setShowSyncModal(true)} title={`Sync-Status: ${syncStatus} | Code: ${syncCode} (Klicken zum Ändern)`}>
                                 {syncStatus === 'synced' && <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm"></span>}
                                 {syncStatus === 'saving' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>}
@@ -361,6 +433,21 @@
                     <main className="max-w-5xl mx-auto w-full p-3 grid grid-cols-1 lg:grid-cols-3 gap-4">
                         <div className="lg:col-span-2 space-y-4">
                             
+                            {/* Projektname */}
+                            <section className="bg-slate-200 rounded-2xl p-3 border border-slate-300 card-shadow flex items-center gap-3">
+                                <div className="text-slate-500 pl-1"><Icon name="tag" size={18} /></div>
+                                <div className="flex-1">
+                                    <label className="text-[8px] font-black text-slate-500 uppercase block mb-0.5">Projekt / Bauteil Name</label>
+                                    <input 
+                                        type="text" 
+                                        value={projectName} 
+                                        onChange={(e) => setProjectName(e.target.value)}
+                                        placeholder="z.B. Roborock Halterung V2" 
+                                        className="w-full bg-slate-100 text-slate-900 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-bold outline-none focus:ring-2 focus:ring-slate-400"
+                                    />
+                                </div>
+                            </section>
+
                             <section className="bg-slate-200 rounded-2xl p-4 border border-slate-300 card-shadow">
                                 <div className="flex items-center gap-2 mb-3 text-slate-500"><Icon name="package" /><h2 className="font-black text-slate-800 uppercase tracking-widest text-[11px]">Filament</h2></div>
                                 {fdmSlots.map((m, i) => (
@@ -429,7 +516,7 @@
                                                     <option value="">Material wählen...</option>
                                                     {db.other.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                                                 </select>
-                                                <button onClick={() => deleteFromDB('other', m.name)} className="bg-red-700/20 text-red-700 p-2 rounded hover:bg-red-700/30 transition-colors"><Icon name="trash-2" size={14} /></button>
+                                                <button onClick={() => deleteFromDB('other', m.name)} className="bg-red-700/20 text-red-700 p-2 rounded hover:bg-red-700/30 transition-colors" title="Aus DB löschen"><Icon name="trash-2" size={14} /></button>
                                             </div>
                                             <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
                                                 <div className="md:col-span-6 flex gap-1">
@@ -449,6 +536,27 @@
                             <section className="bg-slate-200 rounded-2xl p-4 border border-slate-300 card-shadow text-center">
                                 <div className="flex items-center gap-2 mb-3 text-slate-500"><Icon name="user" /><h2 className="font-black text-slate-800 uppercase tracking-widest text-[11px]">Arbeitszeit</h2></div>
                                 <div className="grid grid-cols-2 gap-4"><InlineInput label="Stundensatz" value={job.laborRate} onChange={v => setJob({...job, laborRate: v})} suffix="€/h" bordered /><InlineInput label="Zeit" value={job.laborMinutes} onChange={v => setJob({...job, laborMinutes: v})} suffix="Min" bordered /></div>
+                            </section>
+
+                            {/* Fehldruck & Gewinnmarge */}
+                            <section className="bg-slate-200 rounded-2xl p-4 border border-slate-300 card-shadow">
+                                <div className="flex items-center gap-2 mb-3 text-slate-500"><Icon name="trending-up" /><h2 className="font-black text-slate-800 uppercase tracking-widest text-[11px]">Aufschläge & Marge</h2></div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <InlineInput 
+                                        label="Fehldruck / Ausschuss" 
+                                        value={calculationAddons.failRatePercent} 
+                                        onChange={v => setCalculationAddons({...calculationAddons, failRatePercent: v})} 
+                                        suffix="%" 
+                                        bordered 
+                                    />
+                                    <InlineInput 
+                                        label="Gewinnmarge / Aufschlag" 
+                                        value={calculationAddons.marginPercent} 
+                                        onChange={v => setCalculationAddons({...calculationAddons, marginPercent: v})} 
+                                        suffix="%" 
+                                        bordered 
+                                    />
+                                </div>
                             </section>
 
                             <section className="bg-slate-200 rounded-2xl p-4 border border-slate-300 card-shadow">
@@ -471,24 +579,58 @@
 
                         <div className="space-y-4">
                             <div className="bg-slate-800 rounded-3xl p-6 text-white shadow-2xl sticky top-20 border border-slate-700 overflow-hidden">
-                                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-4 border-b border-slate-700 pb-2 text-center">Kostenaufstellung</p>
-                                <div className="space-y-3 text-[13px] font-bold text-slate-400">
-                                    {results.parts.filament > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>Filament</span><span className="text-white">{results.parts.filament.toFixed(2)} €</span></div>}
-                                    {results.parts.resin > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>Resin</span><span className="text-white">{results.parts.resin.toFixed(2)} €</span></div>}
-                                    {results.parts.uvHarz > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>UV-Harz</span><span className="text-white">{results.parts.uvHarz.toFixed(2)} €</span></div>}
-                                    {results.parts.other > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>Verbrauch</span><span className="text-white">{results.parts.other.toFixed(2)} €</span></div>}
-                                    {results.parts.op > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>Betrieb</span><span className="text-white">{results.parts.op.toFixed(2)} €</span></div>}
-                                    {results.parts.labor > 0 && <div className="flex justify-between border-b border-slate-700 pb-1.5"><span>Arbeitszeit</span><span className="text-white">{results.parts.labor.toFixed(2)} €</span></div>}
+                                <div className="flex justify-between items-center border-b border-slate-700 pb-2 mb-4">
+                                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Kostenaufstellung</p>
+                                    <button 
+                                        onClick={copySummaryToClipboard} 
+                                        title="Zusammenfassung in Zwischenablage kopieren" 
+                                        className="text-slate-400 hover:text-white flex items-center gap-1 text-[10px] uppercase font-bold bg-slate-700/60 hover:bg-slate-700 px-2 py-1 rounded transition-colors"
+                                    >
+                                        <Icon name={copied ? "check" : "copy"} size={12} className={copied ? "text-emerald-400" : ""} />
+                                        <span>{copied ? "Kopiert!" : "Kopieren"}</span>
+                                    </button>
+                                </div>
+                                <div className="space-y-2.5 text-[13px] font-bold text-slate-400">
+                                    {results.parts.filament > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>Filament</span><span className="text-white">{results.parts.filament.toFixed(2)} €</span></div>}
+                                    {results.parts.resin > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>Resin</span><span className="text-white">{results.parts.resin.toFixed(2)} €</span></div>}
+                                    {results.parts.uvHarz > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>UV-Harz</span><span className="text-white">{results.parts.uvHarz.toFixed(2)} €</span></div>}
+                                    {results.parts.other > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>Verbrauch</span><span className="text-white">{results.parts.other.toFixed(2)} €</span></div>}
+                                    {results.parts.op > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>Betrieb</span><span className="text-white">{results.parts.op.toFixed(2)} €</span></div>}
+                                    {results.parts.labor > 0 && <div className="flex justify-between border-b border-slate-700/50 pb-1.5"><span>Arbeitszeit</span><span className="text-white">{results.parts.labor.toFixed(2)} €</span></div>}
+                                    
+                                    {(calculationAddons.failRatePercent > 0 || calculationAddons.marginPercent > 0) && (
+                                        <div className="flex justify-between border-b border-slate-700 pb-1.5 text-slate-300 text-xs font-semibold">
+                                            <span>Selbstkosten (Basis)</span>
+                                            <span>{results.baseTotal.toFixed(2)} €</span>
+                                        </div>
+                                    )}
+
+                                    {calculationAddons.failRatePercent > 0 && (
+                                        <div className="flex justify-between border-b border-slate-700/50 pb-1.5 text-amber-400/90 text-xs">
+                                            <span>Fehldruck ({calculationAddons.failRatePercent}%)</span>
+                                            <span>+{results.failAmount.toFixed(2)} €</span>
+                                        </div>
+                                    )}
+
+                                    {calculationAddons.marginPercent > 0 && (
+                                        <div className="flex justify-between border-b border-slate-700/50 pb-1.5 text-emerald-400/90 text-xs">
+                                            <span>Marge ({calculationAddons.marginPercent}%)</span>
+                                            <span>+{results.marginAmount.toFixed(2)} €</span>
+                                        </div>
+                                    )}
+
                                     <div className="flex flex-col items-center pt-4">
-                                        <span className="text-[10px] uppercase font-black text-slate-500 tracking-widest">Gesamtbetrag</span>
-                                        <span className="text-4xl font-black text-indigo-400 tracking-tighter">{results.total.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</span>
+                                        <span className="text-[10px] uppercase font-black text-slate-500 tracking-widest">
+                                            {calculationAddons.marginPercent > 0 ? "Verkaufspreis" : "Gesamtbetrag"}
+                                        </span>
+                                        <span className="text-4xl font-black text-indigo-400 tracking-tighter">{results.finalTotal.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })}</span>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </main>
                     <footer className="mt-auto py-6 text-center text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-300/30 border-t border-slate-400/20">
-                        © {new Date().getFullYear()} Marcus Hörnemann — V0.0.6
+                        © {new Date().getFullYear()} Marcus Hörnemann — V0.0.7
                     </footer>
                 </div>
             );
