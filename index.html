@@ -55,6 +55,15 @@
         const auth = firebase.auth();
         const firestoreDb = firebase.firestore();
 
+        const generateRandomSyncCode = () => {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            let res = '';
+            for (let i = 0; i < 6; i++) {
+                res += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return res;
+        };
+
         const Icon = ({ name, size = 18, className = "" }) => {
             useEffect(() => { if (window.lucide) { window.lucide.createIcons(); } }, [name]);
             return <i data-lucide={name} style={{ width: size, height: size }} className={`inline-block ${className}`}></i>;
@@ -106,7 +115,13 @@
                 try { return saved ? JSON.parse(saved) : def; } catch (e) { return def; }
             };
 
-            const [syncCode, setSyncCode] = useState(() => localStorage.getItem('3d_sync_code') || 'MARCUS-3D');
+            const [syncCode, setSyncCode] = useState(() => {
+                const saved = localStorage.getItem('3d_sync_code');
+                if (saved && /^[A-Z0-9]{6}$/.test(saved)) return saved;
+                const newCode = generateRandomSyncCode();
+                localStorage.setItem('3d_sync_code', newCode);
+                return newCode;
+            });
             const [tempSyncCode, setTempSyncCode] = useState(syncCode);
             const [showSyncModal, setShowSyncModal] = useState(false);
 
@@ -153,13 +168,13 @@
                 return () => unsubscribeAuth();
             }, []);
 
-            // Firestore Echtzeit-Synchronisation basierend auf Sync-Code
+            // Firestore Echtzeit-Synchronisation basierend auf 6-stelligem Sync-Code
             useEffect(() => {
-                if (!isAuthenticated || !syncCode.trim()) return;
+                if (!isAuthenticated || !syncCode || syncCode.length !== 6) return;
 
                 isInitialLoad.current = true;
                 setSyncStatus('saving');
-                const docRef = firestoreDb.collection("3d_print_calc").doc(syncCode.trim());
+                const docRef = firestoreDb.collection("3d_print_calc").doc(syncCode);
 
                 const unsubscribe = docRef.onSnapshot((doc) => {
                     if (doc.exists) {
@@ -193,11 +208,11 @@
                 const data = { db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job };
                 Object.keys(data).forEach(key => localStorage.setItem(key, JSON.stringify(data[key])));
 
-                if (isInitialLoad.current || !isAuthenticated || !syncCode.trim()) return;
+                if (isInitialLoad.current || !isAuthenticated || !syncCode || syncCode.length !== 6) return;
 
                 setSyncStatus('saving');
                 const timer = setTimeout(() => {
-                    firestoreDb.collection("3d_print_calc").doc(syncCode.trim()).set(data, { merge: true })
+                    firestoreDb.collection("3d_print_calc").doc(syncCode).set(data, { merge: true })
                         .then(() => setSyncStatus('synced'))
                         .catch((err) => {
                             console.error("Firestore Speichern fehlgeschlagen:", err);
@@ -209,10 +224,19 @@
             }, [db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, isAuthenticated, syncCode]);
 
             const saveSyncCode = () => {
-                const cleaned = tempSyncCode.trim().toUpperCase() || 'MARCUS-3D';
+                const cleaned = tempSyncCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6);
+                if (cleaned.length !== 6) {
+                    alert("Der Sync-Code muss genau 6 Zeichen lang sein (Buchstaben und Zahlen).");
+                    return;
+                }
                 setSyncCode(cleaned);
                 localStorage.setItem('3d_sync_code', cleaned);
                 setShowSyncModal(false);
+            };
+
+            const createNewSyncCode = () => {
+                const newCode = generateRandomSyncCode();
+                setTempSyncCode(newCode);
             };
 
             const copySyncCode = () => {
@@ -281,7 +305,7 @@
                     <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-50 px-3 h-14 flex items-center justify-between shadow-md text-white">
                         <div className="flex items-center gap-2">
                             <img src="logo.png" className="w-8 h-8 rounded-lg shadow-sm" onError={(e) => e.target.style.display='none'} />
-                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V0.0.4</span></h1>
+                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V0.0.5</span></h1>
                             <div className="flex items-center ml-2 cursor-pointer" onClick={() => setShowSyncModal(true)} title={`Sync-Status: ${syncStatus} | Code: ${syncCode} (Klicken zum Ändern)`}>
                                 {syncStatus === 'synced' && <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm"></span>}
                                 {syncStatus === 'saving' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>}
@@ -290,9 +314,9 @@
                             </div>
                         </div>
                         <div className="flex gap-1.5 items-center">
-                            <button onClick={() => { setTempSyncCode(syncCode); setShowSyncModal(true); }} title="Sync-Code verwalten" className="bg-slate-700 p-2 rounded-lg transition-all hover:bg-slate-600 flex items-center gap-1 text-[11px] font-bold">
+                            <button onClick={() => { setTempSyncCode(syncCode); setShowSyncModal(true); }} title="Sync-Code verwalten" className="bg-slate-700 p-2 rounded-lg transition-all hover:bg-slate-600 flex items-center gap-1.5 text-[11px] font-mono font-bold tracking-wider">
                                 <Icon name="key" size={16} />
-                                <span className="hidden sm:inline max-w-[80px] truncate">{syncCode}</span>
+                                <span className="hidden sm:inline">{syncCode}</span>
                             </button>
                             <button onClick={exportData} title="Backup" className="bg-slate-700 p-2 rounded-lg transition-all hover:bg-slate-600"><Icon name="save" size={16} /></button>
                             <label className="bg-slate-100 text-slate-800 p-2 rounded-lg transition-all cursor-pointer hover:bg-white"><Icon name="folder-open" size={16} /><input type="file" accept=".json" onChange={(e) => {
@@ -314,30 +338,34 @@
                                     </div>
                                     <button onClick={() => setShowSyncModal(false)} className="text-slate-400 hover:text-white"><Icon name="x" size={18} /></button>
                                 </div>
-                                <p className="text-xs text-slate-300">
-                                    Verwende auf allen deinen Geräten (Smartphone, PC, Tablet) denselben <strong>Sync-Code</strong>, um auf dieselbe Datenbank zuzugreifen.
+                                <p className="text-xs text-slate-300 leading-relaxed">
+                                    Gib diesen <strong>6-stelligen Sync-Code</strong> auf all deinen Geräten ein, um überall den gleichen Datenbestand synchron zu halten.
                                 </p>
                                 <div>
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Dein Sync-Code</label>
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">6-Stelliger Sync-Code</label>
                                     <div className="flex gap-2">
                                         <input 
                                             type="text" 
+                                            maxLength="6"
                                             value={tempSyncCode} 
-                                            onChange={(e) => setTempSyncCode(e.target.value.toUpperCase())}
-                                            placeholder="z.B. MARCUS-3D"
-                                            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono font-bold uppercase tracking-wider text-white outline-none focus:border-indigo-400"
+                                            onChange={(e) => setTempSyncCode(e.target.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6))}
+                                            placeholder="Z.B. X7K9P2"
+                                            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-center text-lg font-mono font-black uppercase tracking-widest text-white outline-none focus:border-indigo-400"
                                         />
-                                        <button onClick={copySyncCode} title="Code kopieren" className="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-slate-200 border border-slate-600 flex items-center justify-center">
+                                        <button onClick={copySyncCode} title="Aktuellen Code kopieren" className="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-slate-200 border border-slate-600 flex items-center justify-center">
                                             <Icon name="copy" size={16} />
+                                        </button>
+                                        <button onClick={createNewSyncCode} title="Neuen Code generieren" className="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-slate-200 border border-slate-600 flex items-center justify-center">
+                                            <Icon name="refresh-cw" size={16} />
                                         </button>
                                     </div>
                                 </div>
                                 <div className="flex gap-2 pt-2">
-                                    <button onClick={saveSyncCode} className="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all">
-                                        Sync-Code anwenden
+                                    <button onClick={saveSyncCode} className="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-md">
+                                        Code aktivieren
                                     </button>
-                                    <button onClick={() => setShowSyncModal(false)} className="px-4 bg-slate-700 hover:bg-slate-600 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all">
-                                        Abbrechen
+                                    <button onClick={() => setShowSyncModal(false)} className="px-4 bg-slate-700 hover:bg-slate-600 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all">
+                                        Schließen
                                     </button>
                                 </div>
                             </div>
@@ -474,7 +502,7 @@
                         </div>
                     </main>
                     <footer className="mt-auto py-6 text-center text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-300/30 border-t border-slate-400/20">
-                        © {new Date().getFullYear()} Marcus Hörnemann — V0.0.4
+                        © {new Date().getFullYear()} Marcus Hörnemann — V0.0.5
                     </footer>
                 </div>
             );
