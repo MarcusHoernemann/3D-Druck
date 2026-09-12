@@ -15,6 +15,11 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
 
+    <!-- Firebase App, Auth & Firestore SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
     
     <style>
@@ -32,7 +37,23 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useMemo, useEffect } = React;
+        const { useState, useMemo, useEffect, useRef } = React;
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDjkXF1xAqYjoNU36j4jtUq2m4m4Hl1PMQ",
+            authDomain: "d-druck-9fe6a.firebaseapp.com",
+            projectId: "d-druck-9fe6a",
+            storageBucket: "d-druck-9fe6a.firebasestorage.app",
+            messagingSenderId: "138282273500",
+            appId: "1:138282273500:web:599cf666ef6e1948f60219",
+            measurementId: "G-S3S1HM97RS"
+        };
+
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const auth = firebase.auth();
+        const firestoreDb = firebase.firestore();
 
         const Icon = ({ name, size = 18, className = "" }) => {
             useEffect(() => { if (window.lucide) { window.lucide.createIcons(); } }, [name]);
@@ -85,6 +106,10 @@
                 try { return saved ? JSON.parse(saved) : def; } catch (e) { return def; }
             };
 
+            const [syncCode, setSyncCode] = useState(() => localStorage.getItem('3d_sync_code') || 'MARCUS-3D');
+            const [tempSyncCode, setTempSyncCode] = useState(syncCode);
+            const [showSyncModal, setShowSyncModal] = useState(false);
+
             const [db, setDb] = useState(() => load('materialDB', { filament: [], resin: [], uv: [], other: [] }));
             const [fdmSlots, setFdmSlots] = useState(() => {
                 const saved = load('fdmSlots', null);
@@ -108,11 +133,92 @@
             const [washCure, setWashCure] = useState(() => load('washCure', { purchasePrice: 0, lifespan: 2000, watts: 40, minutes: 0, active: false }));
             const [globalSettings, setGlobalSettings] = useState(() => load('globalSettings', { electricityPriceKWh: 0.35 }));
             const [job, setJob] = useState(() => load('job', { laborRate: 0, laborMinutes: 0 }));
+            
+            const [syncStatus, setSyncStatus] = useState('offline');
+            const [isAuthenticated, setIsAuthenticated] = useState(false);
+            const isInitialLoad = useRef(true);
 
+            // Anonyme Firebase-Authentifizierung
+            useEffect(() => {
+                const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+                    if (user) {
+                        setIsAuthenticated(true);
+                    } else {
+                        auth.signInAnonymously().catch((err) => {
+                            console.error("Auth-Fehler:", err);
+                            setSyncStatus('error');
+                        });
+                    }
+                });
+                return () => unsubscribeAuth();
+            }, []);
+
+            // Firestore Echtzeit-Synchronisation basierend auf Sync-Code
+            useEffect(() => {
+                if (!isAuthenticated || !syncCode.trim()) return;
+
+                isInitialLoad.current = true;
+                setSyncStatus('saving');
+                const docRef = firestoreDb.collection("3d_print_calc").doc(syncCode.trim());
+
+                const unsubscribe = docRef.onSnapshot((doc) => {
+                    if (doc.exists) {
+                        const d = doc.data();
+                        if (d.db) setDb(d.db);
+                        if (d.fdmSlots) setFdmSlots(d.fdmSlots);
+                        if (d.resinMaterial) setResinMaterial(d.resinMaterial);
+                        if (d.uvResin) setUvResin(d.uvResin);
+                        if (d.otherMaterials) setOtherMaterials(d.otherMaterials);
+                        if (d.printerFdm) setPrinterFdm(d.printerFdm);
+                        if (d.printerResin) setPrinterResin(d.printerResin);
+                        if (d.washCure) setWashCure(d.washCure);
+                        if (d.globalSettings) setGlobalSettings(d.globalSettings);
+                        if (d.job) setJob(d.job);
+                        setSyncStatus('synced');
+                    } else {
+                        const initialPayload = { db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job };
+                        docRef.set(initialPayload).then(() => setSyncStatus('synced'));
+                    }
+                    isInitialLoad.current = false;
+                }, (error) => {
+                    console.error("Firestore Fehler:", error);
+                    setSyncStatus('error');
+                });
+
+                return () => unsubscribe();
+            }, [isAuthenticated, syncCode]);
+
+            // Auto-Save in LocalStorage und Firestore (mit Debounce)
             useEffect(() => {
                 const data = { db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job };
                 Object.keys(data).forEach(key => localStorage.setItem(key, JSON.stringify(data[key])));
-            }, [db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job]);
+
+                if (isInitialLoad.current || !isAuthenticated || !syncCode.trim()) return;
+
+                setSyncStatus('saving');
+                const timer = setTimeout(() => {
+                    firestoreDb.collection("3d_print_calc").doc(syncCode.trim()).set(data, { merge: true })
+                        .then(() => setSyncStatus('synced'))
+                        .catch((err) => {
+                            console.error("Firestore Speichern fehlgeschlagen:", err);
+                            setSyncStatus('error');
+                        });
+                }, 800);
+
+                return () => clearTimeout(timer);
+            }, [db, fdmSlots, resinMaterial, uvResin, otherMaterials, printerFdm, printerResin, washCure, globalSettings, job, isAuthenticated, syncCode]);
+
+            const saveSyncCode = () => {
+                const cleaned = tempSyncCode.trim().toUpperCase() || 'MARCUS-3D';
+                setSyncCode(cleaned);
+                localStorage.setItem('3d_sync_code', cleaned);
+                setShowSyncModal(false);
+            };
+
+            const copySyncCode = () => {
+                navigator.clipboard.writeText(syncCode);
+                alert(`Sync-Code "${syncCode}" in die Zwischenablage kopiert!`);
+            };
 
             const saveToDB = (type, item) => {
                 if (!item.name) return;
@@ -120,7 +226,7 @@
                 const entry = type === 'other' ? { name: item.name, price: item.price } : { name: item.name, weight: item.weightGrams || item.bottleSize, price: item.price };
                 const exists = newDb[type].findIndex(x => x.name === item.name);
                 if (exists >= 0) newDb[type][exists] = entry; else newDb[type].push(entry);
-                setDb(newDb); alert("Gesichert!");
+                setDb(newDb);
             };
 
             const deleteFromDB = (type, name) => {
@@ -175,9 +281,19 @@
                     <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-50 px-3 h-14 flex items-center justify-between shadow-md text-white">
                         <div className="flex items-center gap-2">
                             <img src="logo.png" className="w-8 h-8 rounded-lg shadow-sm" onError={(e) => e.target.style.display='none'} />
-                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V1.9.9.3</span></h1>
+                            <h1 className="text-sm font-black tracking-tighter uppercase">DruckKosten <span className="text-slate-400 text-[10px]">V0.0.4</span></h1>
+                            <div className="flex items-center ml-2 cursor-pointer" onClick={() => setShowSyncModal(true)} title={`Sync-Status: ${syncStatus} | Code: ${syncCode} (Klicken zum Ändern)`}>
+                                {syncStatus === 'synced' && <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm"></span>}
+                                {syncStatus === 'saving' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>}
+                                {syncStatus === 'error' && <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>}
+                                {syncStatus === 'offline' && <span className="w-2.5 h-2.5 rounded-full bg-slate-500"></span>}
+                            </div>
                         </div>
-                        <div className="flex gap-1.5">
+                        <div className="flex gap-1.5 items-center">
+                            <button onClick={() => { setTempSyncCode(syncCode); setShowSyncModal(true); }} title="Sync-Code verwalten" className="bg-slate-700 p-2 rounded-lg transition-all hover:bg-slate-600 flex items-center gap-1 text-[11px] font-bold">
+                                <Icon name="key" size={16} />
+                                <span className="hidden sm:inline max-w-[80px] truncate">{syncCode}</span>
+                            </button>
                             <button onClick={exportData} title="Backup" className="bg-slate-700 p-2 rounded-lg transition-all hover:bg-slate-600"><Icon name="save" size={16} /></button>
                             <label className="bg-slate-100 text-slate-800 p-2 rounded-lg transition-all cursor-pointer hover:bg-white"><Icon name="folder-open" size={16} /><input type="file" accept=".json" onChange={(e) => {
                                 const reader = new FileReader();
@@ -186,6 +302,47 @@
                             }} className="hidden" /></label>
                         </div>
                     </header>
+
+                    {/* Sync-Code Modal */}
+                    {showSyncModal && (
+                        <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 text-white card-shadow animate-fade-in space-y-4">
+                                <div className="flex justify-between items-center border-b border-slate-700 pb-3">
+                                    <div className="flex items-center gap-2">
+                                        <Icon name="cloud" size={20} className="text-indigo-400" />
+                                        <h2 className="text-sm font-black uppercase tracking-wider">Geräte-Synchronisation</h2>
+                                    </div>
+                                    <button onClick={() => setShowSyncModal(false)} className="text-slate-400 hover:text-white"><Icon name="x" size={18} /></button>
+                                </div>
+                                <p className="text-xs text-slate-300">
+                                    Verwende auf allen deinen Geräten (Smartphone, PC, Tablet) denselben <strong>Sync-Code</strong>, um auf dieselbe Datenbank zuzugreifen.
+                                </p>
+                                <div>
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Dein Sync-Code</label>
+                                    <div className="flex gap-2">
+                                        <input 
+                                            type="text" 
+                                            value={tempSyncCode} 
+                                            onChange={(e) => setTempSyncCode(e.target.value.toUpperCase())}
+                                            placeholder="z.B. MARCUS-3D"
+                                            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono font-bold uppercase tracking-wider text-white outline-none focus:border-indigo-400"
+                                        />
+                                        <button onClick={copySyncCode} title="Code kopieren" className="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-slate-200 border border-slate-600 flex items-center justify-center">
+                                            <Icon name="copy" size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="flex gap-2 pt-2">
+                                    <button onClick={saveSyncCode} className="flex-1 bg-indigo-600 hover:bg-indigo-500 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all">
+                                        Sync-Code anwenden
+                                    </button>
+                                    <button onClick={() => setShowSyncModal(false)} className="px-4 bg-slate-700 hover:bg-slate-600 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all">
+                                        Abbrechen
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     <main className="max-w-5xl mx-auto w-full p-3 grid grid-cols-1 lg:grid-cols-3 gap-4">
                         <div className="lg:col-span-2 space-y-4">
@@ -317,7 +474,7 @@
                         </div>
                     </main>
                     <footer className="mt-auto py-6 text-center text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-300/30 border-t border-slate-400/20">
-                        © {new Date().getFullYear()} Marcus Hörnemann — V1.9.9.3
+                        © {new Date().getFullYear()} Marcus Hörnemann — V0.0.4
                     </footer>
                 </div>
             );
